@@ -74,15 +74,33 @@ async def safecheck_upload_pdf(pdf_bytes: bytes, filename: str) -> dict:
     form = aiohttp.FormData()
     form.add_field('file', pdf_bytes, filename=filename, content_type='application/pdf')
     
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post(url, headers=headers, data=form, timeout=30) as resp:
-                result = await resp.json()
-                logger.info(f"SafeCheck upload response: {result}")
-                return result
-        except Exception as e:
-            logger.exception("Failed to upload to SafeCheck API")
-            return {"error": 1, "msg": f"Ошибка загрузки: {str(e)}"}
+    # Retry logic for "Too many connections" error
+    max_retries = 3
+    for attempt in range(max_retries):
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(url, headers=headers, data=form, timeout=30) as resp:
+                    result = await resp.json()
+                    logger.info(f"SafeCheck upload response (attempt {attempt + 1}): {result}")
+                    
+                    # Check for "Too many connections" error
+                    if result.get('detail', {}).get('error') == 1:
+                        error_msg = result.get('detail', {}).get('msg', '')
+                        if 'Too many active connections' in error_msg or 'wait' in error_msg.lower():
+                            if attempt < max_retries - 1:
+                                wait_time = (attempt + 1) * 3  # 3, 6, 9 seconds
+                                logger.info(f"Too many connections, waiting {wait_time}s before retry...")
+                                await asyncio.sleep(wait_time)
+                                continue
+                    
+                    return result
+            except Exception as e:
+                logger.exception(f"Failed to upload to SafeCheck API (attempt {attempt + 1})")
+                if attempt == max_retries - 1:
+                    return {"error": 1, "msg": f"Ошибка загрузки: {str(e)}"}
+                await asyncio.sleep(2)
+    
+    return {"error": 1, "msg": "Превышено количество попыток загрузки"}
 
 
 async def safecheck_get_result(file_id: str, max_retries: int = 10, delay: int = 3) -> dict:
