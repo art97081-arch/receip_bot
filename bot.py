@@ -70,13 +70,13 @@ async def safecheck_upload_pdf(pdf_bytes: bytes, filename: str) -> dict:
         'SC-USER-ID': user_id
     }
     
-    # Prepare multipart form data
-    form = aiohttp.FormData()
-    form.add_field('file', pdf_bytes, filename=filename, content_type='application/pdf')
-    
     # Retry logic for "Too many connections" error
     max_retries = 3
     for attempt in range(max_retries):
+        # Create new FormData for each attempt
+        form = aiohttp.FormData()
+        form.add_field('file', pdf_bytes, filename=filename, content_type='application/pdf')
+        
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.post(url, headers=headers, data=form, timeout=30) as resp:
