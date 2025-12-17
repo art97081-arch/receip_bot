@@ -174,6 +174,33 @@ def format_check_result(result: dict) -> str:
     if device_error:
         lines.append(f"⚠️ Ошибка устройства: Файл сохранен некорректно")
     
+    # Detailed violations if check failed
+    if color in ["yellow", "red", "black"] and check_result:
+        violations = []
+        
+        if not is_original:
+            violations.append("❌ Чек не является оригиналом")
+        
+        if not struct_passed:
+            violations.append(f"❌ Структура PDF нарушена: {struct_result}")
+        
+        if device_error:
+            violations.append("❌ Обнаружена ошибка сохранения файла")
+        
+        # Check for specific fields that might indicate issues
+        if "last_checks" in check_result:
+            try:
+                last_checks = int(check_result.get("last_checks", 0))
+                if last_checks > 0:
+                    violations.append(f"⚠️ Чек уже проверялся {last_checks} раз")
+            except:
+                pass
+        
+        if violations:
+            lines.append(f"\n⚠️ Обнаруженные нарушения:")
+            for violation in violations:
+                lines.append(f"  • {violation}")
+    
     lines.append(f"\n💡 Рекомендация: {recommendation}")
     lines.append(f"🏦 Верификатор: {verifier}")
     
