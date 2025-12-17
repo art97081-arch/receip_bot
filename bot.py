@@ -175,50 +175,51 @@ def format_check_result(result: dict) -> str:
         lines.append(f"⚠️ Ошибка устройства: Файл сохранен некорректно")
     
     # Detailed violations if check failed
-    if color in ["yellow", "red", "black"] and check_result:
-        violations = []
+    violations = []
+    
+    # Check all violation types regardless of color
+    if not is_original:
+        violations.append("❌ Чек не является оригиналом")
+        violations.append("   ℹ️ Документ был изменен или пересоздан")
+    
+    if not struct_passed:
+        violations.append(f"❌ Структура PDF нарушена: {struct_result}")
         
-        if not is_original:
-            violations.append("❌ Чек не является оригиналом")
-        
-        if not struct_passed:
-            violations.append(f"❌ Структура PDF нарушена: {struct_result}")
-            
-            # Add explanation of what struct_result means
-            try:
-                if "/" in struct_result:
-                    passed, total = struct_result.split("/")
-                    failed = int(total) - int(passed)
-                    violations.append(f"   ℹ️ Не пройдено {failed} из {total} проверок структуры:")
-                    violations.append(f"   • Метаданные PDF (автор, дата создания)")
-                    violations.append(f"   • Цифровые подписи и сертификаты")
-                    violations.append(f"   • Формат и кодировка документа")
-                    violations.append(f"   • Встроенные шрифты и изображения")
-                    violations.append(f"   • История изменений файла")
-                    violations.append(f"   • Структура объектов PDF")
-                    violations.append(f"   • XMP метаданные")
-                    violations.append(f"   • Свойства приложения создателя")
-            except:
-                pass
-        
-        if device_error:
-            violations.append("❌ Обнаружена ошибка сохранения файла")
-            violations.append("   ℹ️ Файл был создан или изменен некорректно")
-        
-        # Check for specific fields that might indicate issues
-        if "last_checks" in check_result:
-            try:
-                last_checks = int(check_result.get("last_checks", 0))
-                if last_checks > 0:
-                    violations.append(f"⚠️ Чек уже проверялся {last_checks} раз")
-                    violations.append(f"   ℹ️ Возможна попытка мошенничества")
-            except:
-                pass
-        
-        if violations:
-            lines.append(f"\n⚠️ Обнаруженные нарушения:")
-            for violation in violations:
-                lines.append(f"  {violation}")
+        # Add explanation of what struct_result means
+        try:
+            if "/" in struct_result:
+                passed, total = struct_result.split("/")
+                failed = int(total) - int(passed)
+                violations.append(f"   ℹ️ Не пройдено {failed} из {total} проверок структуры:")
+                violations.append(f"   • Метаданные PDF (автор, дата создания)")
+                violations.append(f"   • Цифровые подписи и сертификаты")
+                violations.append(f"   • Формат и кодировка документа")
+                violations.append(f"   • Встроенные шрифты и изображения")
+                violations.append(f"   • История изменений файла")
+                violations.append(f"   • Структура объектов PDF")
+                violations.append(f"   • XMP метаданные")
+                violations.append(f"   • Свойства приложения создателя")
+        except:
+            pass
+    
+    if device_error:
+        violations.append("❌ Обнаружена ошибка сохранения файла")
+        violations.append("   ℹ️ Файл был создан или изменен некорректно")
+    
+    # Check for specific fields that might indicate issues
+    if "last_checks" in check_result:
+        try:
+            last_checks = int(check_result.get("last_checks", 0))
+            if last_checks > 0:
+                violations.append(f"⚠️ Чек уже проверялся {last_checks} раз")
+                violations.append(f"   ℹ️ Возможна попытка мошенничества")
+        except:
+            pass
+    
+    if violations:
+        lines.append(f"\n⚠️ Обнаруженные нарушения:")
+        for violation in violations:
+            lines.append(f"  {violation}")
     
     lines.append(f"\n💡 Рекомендация: {recommendation}")
     lines.append(f"🏦 Верификатор: {verifier}")
