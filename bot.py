@@ -66,7 +66,15 @@ async def datagrab_check_pdf(pdf_bytes: bytes, filename: str) -> dict:
     form = aiohttp.FormData()
     form.add_field('file', pdf_bytes, filename=filename, content_type='application/pdf')
     
-    async with aiohttp.ClientSession() as session:
+    # Create SSL context that doesn't verify certificates (for api.datagrab.ru)
+    import ssl
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+    
+    connector = aiohttp.TCPConnector(ssl=ssl_context)
+    
+    async with aiohttp.ClientSession(connector=connector) as session:
         try:
             async with session.post(url, data=form, timeout=60) as resp:
                 result = await resp.json()
