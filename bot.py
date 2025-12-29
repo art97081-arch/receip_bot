@@ -77,9 +77,21 @@ async def datagrab_check_pdf(pdf_bytes: bytes, filename: str) -> dict:
     async with aiohttp.ClientSession(connector=connector) as session:
         try:
             async with session.post(url, data=form, timeout=60) as resp:
-                result = await resp.json()
-                logger.info(f"Datagrab response: {result}")
-                return result
+                # Get response text first to check what we received
+                text = await resp.text()
+                logger.info(f"Datagrab response status: {resp.status}, content-type: {resp.content_type}")
+                logger.info(f"Datagrab response text (first 500 chars): {text[:500]}")
+                
+                # Try to parse as JSON
+                try:
+                    import json
+                    result = json.loads(text)
+                    logger.info(f"Datagrab parsed response: {result}")
+                    return result
+                except json.JSONDecodeError:
+                    logger.error(f"Failed to parse JSON, got HTML: {text[:200]}")
+                    return {"result": "error", "message": f"API вернул HTML вместо JSON. Возможно неверный API ключ или проблема с сервером"}
+                    
         except asyncio.TimeoutError:
             logger.error("Timeout waiting for Datagrab API response")
             return {"result": "error", "message": "Превышено время ожидания ответа от сервера"}
