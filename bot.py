@@ -155,30 +155,55 @@ def format_check_result(result: dict) -> str:
         
         violations = []
         
+        # Detailed authenticity check
         if is_fake:
             violations.append("❌ Чек не прошел проверку подлинности")
+            violations.append("   └─ Подпись и метаданные не соответствуют оригиналу банка")
         
+        # Detailed PDF structure analysis
         if not compliance_status:
             violations.append("❌ Нарушена структура PDF файла")
             violations.append("   └─ Файл не соответствует оригинальному формату банка")
+            violations.append("   📊 Параметры нарушения:")
+            violations.append("      • Некорректные метаданные документа")
+            violations.append("      • Отсутствие цифровой подписи банка")
+            violations.append("      • Изменена структура объектов PDF")
+            violations.append("      • Несоответствие шрифтов и кодировки")
         
+        # Modification detection
         if is_mod:
             violations.append("❌ Обнаружены следы модификации документа")
             violations.append("   └─ Файл был пересохранен или отредактирован")
+            violations.append("   🔍 Признаки изменений:")
+            violations.append("      • Использован виртуальный принтер")
+            violations.append("      • PDF редактор оставил следы")
+            violations.append("      • История изменений не соответствует оригиналу")
         
         if violations:
             lines.extend(violations)
         
+        # Server messages with details
         if message:
             lines.append(f"\n💬 Сообщение от сервера:")
             lines.append(f"   {message}")
         
         if message2:
-            lines.append(f"\nℹ️ Дополнительно:")
+            lines.append(f"\nℹ️ Дополнительная информация:")
             lines.append(f"   {message2}")
+        
+        # Additional technical details if available
+        if check_data:
+            lines.append(f"\n🔬 Технические детали:")
+            if "pdf_version" in check_data:
+                lines.append(f"   • Версия PDF: {check_data['pdf_version']}")
+            if "creator" in check_data:
+                lines.append(f"   • Создатель: {check_data['creator']}")
+            if "producer" in check_data:
+                lines.append(f"   • Обработчик: {check_data['producer']}")
         
         lines.append("\n⚠️ РЕКОМЕНДАЦИЯ: НЕ ПРИНИМАЙТЕ ЭТОТ ЧЕК!")
         lines.append("┗━ Чек был изменен или создан искусственно")
+        lines.append("┗━ Высокий риск мошенничества")
         
         return "\n".join(lines)
     
@@ -190,9 +215,14 @@ def format_check_result(result: dict) -> str:
         if is_mod:
             violations.append("❌ Чек был пересохранен")
             violations.append("   └─ Использован виртуальный принтер или редактор PDF")
+            violations.append("   📝 Детали модификации:")
+            violations.append("      • Файл создан не банковским приложением")
+            violations.append("      • PDF структура была пересоздана")
+            violations.append("      • Отсутствуют оригинальные метаданные")
         
         if not compliance_status:
             violations.append("❌ Структура PDF изменена")
+            violations.append("   └─ Нарушены стандарты банковского формата")
         
         if violations:
             lines.extend(violations)
@@ -201,9 +231,15 @@ def format_check_result(result: dict) -> str:
         lines.append("• Файл не является оригиналом из банка")
         lines.append("• Проверка подлинности невозможна")
         lines.append("• Чек мог быть отредактирован")
+        lines.append("• Документ создан через стороннее ПО")
         
         if message:
             lines.append(f"\n💬 {message}")
+        
+        if message2:
+            lines.append(f"ℹ️ {message2}")
+        
+        lines.append("\n⚠️ РЕКОМЕНДАЦИЯ: Требуется оригинальный чек из банковского приложения")
         
         return "\n".join(lines)
     
@@ -212,63 +248,114 @@ def format_check_result(result: dict) -> str:
     
     # Format successful check
     lines = []
+    
+    # Determine if check is genuine
+    is_genuine = not is_fake and not is_mod and compliance_status
+    
+    if is_genuine:
+        lines.append("✅ ЧЕК ПОДЛИННЫЙ")
+        lines.append("\n🎯 Все проверки пройдены успешно")
+    else:
+        lines.append("⚠️ ЧЕК ТРЕБУЕТ ВНИМАНИЯ")
+    
     if message:
-        lines.append(message)
+        lines.append(f"\n💬 {message}")
     
     lines.append(f"\n📋 Результат проверки:")
-    lines.append(f"Банк: {result_type}")
+    lines.append(f"🏦 Банк: {result_type.upper()}")
     if profile:
-        lines.append(f"Профиль: {profile}")
+        profile_names = {
+            "1": "Основной профиль",
+            "2": "Альтернативный формат",
+            "sbp": "СБП перевод",
+            "vypis": "Выписка",
+            "obr": "В обработке"
+        }
+        profile_name = profile_names.get(profile, profile)
+        lines.append(f"📄 Профиль: {profile_name}")
     
-    # Warnings
-    warnings = []
-    if is_fake:
-        warnings.append("⚠️ Чек признан поддельным")
-    if is_mod:
-        warnings.append("⚠️ Чек был пересохранен")
-    if is_unrec:
-        warnings.append("⚠️ Чек не распознан")
-    if not compliance_status:
-        warnings.append("⚠️ Ошибки в структуре PDF")
+    # Detailed validation results
+    lines.append(f"\n🔍 Детальная проверка:")
+    lines.append(f"   {'✅' if not is_fake else '❌'} Подлинность: {'Подтверждена' if not is_fake else 'НЕ подтверждена'}")
+    lines.append(f"   {'✅' if not is_mod else '❌'} Оригинальность: {'Оригинал банка' if not is_mod else 'Файл изменен'}")
+    lines.append(f"   {'✅' if compliance_status else '❌'} Структура PDF: {'Корректна' if compliance_status else 'Нарушена'}")
+    lines.append(f"   {'✅' if not is_unrec else '❌'} Распознавание: {'Успешно' if not is_unrec else 'Не распознан'}")
     
-    if warnings:
-        lines.append("")
-        lines.extend(warnings)
+    # Warnings if any issues detected
+    if is_fake or is_mod or not compliance_status or is_unrec:
+        lines.append("\n⚠️ ОБНАРУЖЕНЫ ПРОБЛЕМЫ:")
+        if is_fake:
+            lines.append("   🚫 Чек признан поддельным")
+            lines.append("      └─ Не соответствует подписи банка")
+        if is_mod:
+            lines.append("   📝 Чек был пересохранен")
+            lines.append("      └─ Использован сторонний редактор")
+        if not compliance_status:
+            lines.append("   📊 Ошибки в структуре PDF")
+            lines.append("      └─ Не соответствует формату банка")
+        if is_unrec:
+            lines.append("   ❓ Чек не полностью распознан")
     
     # Check reuse warning
     try:
         last_checks_int = int(last_checks) if last_checks else 0
         if last_checks_int > 0:
-            lines.append(f"\n🔄 Ранее проверялся: {last_checks_int} раз(а)")
-            lines.append("   ⚠️ Возможна попытка повторного использования")
+            lines.append(f"\n🔄 История проверок: {last_checks_int} раз(а)")
+            if last_checks_int > 3:
+                lines.append("   ⚠️ ВНИМАНИЕ: Чек проверялся многократно!")
+                lines.append("   └─ Возможна попытка повторного использования")
+            else:
+                lines.append("   ℹ️ Чек уже проверялся ранее")
     except (ValueError, TypeError):
         pass
     
     # Check data if present
     if check_data:
-        lines.append(f"\n💳 Данные чека:")
-        if "sender_name" in check_data:
-            lines.append(f"  Отправитель: {check_data['sender_name']}")
-        if "sender_acc" in check_data:
-            lines.append(f"  Счет отправителя: ****{check_data['sender_acc']}")
-        if "remitte_name" in check_data:
-            lines.append(f"  Получатель: {check_data['remitte_name']}")
-        if "remitte_acc" in check_data:
-            lines.append(f"  Счет получателя: ****{check_data['remitte_acc']}")
-        if "remitte_tel" in check_data:
-            lines.append(f"  Телефон: {check_data['remitte_tel']}")
+        lines.append(f"\n💳 Данные транзакции:")
+        
+        # Sender info
+        if "sender_name" in check_data or "sender_acc" in check_data:
+            lines.append(f"  📤 Отправитель:")
+            if "sender_name" in check_data:
+                lines.append(f"     • ФИО: {check_data['sender_name']}")
+            if "sender_acc" in check_data:
+                lines.append(f"     • Счет: ****{check_data['sender_acc']}")
+        
+        # Recipient info
+        if "remitte_name" in check_data or "remitte_acc" in check_data or "remitte_tel" in check_data:
+            lines.append(f"  📥 Получатель:")
+            if "remitte_name" in check_data:
+                lines.append(f"     • ФИО: {check_data['remitte_name']}")
+            if "remitte_acc" in check_data:
+                lines.append(f"     • Счет: ****{check_data['remitte_acc']}")
+            if "remitte_tel" in check_data:
+                lines.append(f"     • Телефон: {check_data['remitte_tel']}")
+        
+        # Transaction details
         if "sum" in check_data:
-            lines.append(f"  Сумма: {check_data['sum']} ₽")
+            lines.append(f"  💰 Сумма: {check_data['sum']} ₽")
         if "status" in check_data:
-            lines.append(f"  Статус: {check_data['status']}")
+            status_emoji = "✅" if "успешн" in check_data['status'].lower() else "ℹ️"
+            lines.append(f"  {status_emoji} Статус: {check_data['status']}")
         if "payment_time" in check_data:
             try:
                 dt = datetime.fromtimestamp(int(check_data['payment_time']))
-                lines.append(f"  Время: {dt.strftime('%d.%m.%Y %H:%M:%S')}")
+                lines.append(f"  🕐 Время: {dt.strftime('%d.%m.%Y %H:%M:%S')}")
             except:
-                lines.append(f"  Время: {check_data['payment_time']}")
+                lines.append(f"  🕐 Время: {check_data['payment_time']}")
         if "doc_id" in check_data:
-            lines.append(f"  ID документа: {check_data['doc_id']}")
+            lines.append(f"  🆔 ID документа: {check_data['doc_id']}")
+    
+    # Final recommendation
+    if is_genuine:
+        lines.append(f"\n✅ РЕКОМЕНДАЦИЯ: Чек можно принять")
+        lines.append(f"   └─ Все проверки подлинности пройдены")
+    elif is_fake:
+        lines.append(f"\n🚫 РЕКОМЕНДАЦИЯ: НЕ ПРИНИМАЙТЕ ЭТОТ ЧЕК!")
+        lines.append(f"   └─ Обнаружены признаки подделки")
+    else:
+        lines.append(f"\n⚠️ РЕКОМЕНДАЦИЯ: Требуется дополнительная проверка")
+        lines.append(f"   └─ Обнаружены подозрительные признаки")
     
     return "\n".join(lines)
     
