@@ -47,57 +47,92 @@ def save_allowed(ids: List[int]):
         json.dump([int(x) for x in ids], f, ensure_ascii=False, indent=2)
 
 
-async def datagrab_check_pdf(pdf_bytes: bytes, filename: str) -> dict:
+async def safecheck_upload_pdf(pdf_bytes: bytes, filename: str) -> dict:
     """
-    Upload and check PDF file via Datagrab API.
+    Upload PDF file to SafeCheck API for bank receipt verification.
     
-    POST https://api.datagrab.ru/upload.php?key={api_key}
-    Returns immediate result with check status.
+    POST {endpoint}/check
+    Returns immediate response which should contain file_id for polling.
     """
-    api_key = os.environ.get("DATAGRAB_API_KEY")
+    api_key = os.environ.get("SAFECHECK_API_KEY")
+    user_id = os.environ.get("SAFECHECK_USER_ID")
     
     if not api_key:
-        raise RuntimeError("DATAGRAB_API_KEY not set in environment")
+        raise RuntimeError("SAFECHECK_API_KEY not set in environment")
+    if not user_id:
+        raise RuntimeError("SAFECHECK_USER_ID not set in environment")
     
-    endpoint = os.environ.get("DATAGRAB_ENDPOINT", "https://api.datagrab.ru")
-    url = f"{endpoint}/upload.php?key={api_key}"
+    endpoint = os.environ.get("SAFECHECK_ENDPOINT", "https://ru.safecheck.online/api")
+    url = f"{endpoint}/check"
+    
+    headers = {
+        'SC-API-KEY': api_key,
+        'SC-USER-ID': user_id
+    }
     
     # Prepare multipart form data
     form = aiohttp.FormData()
     form.add_field('file', pdf_bytes, filename=filename, content_type='application/pdf')
     
-    # Create SSL context that doesn't verify certificates (for api.datagrab.ru)
-    import ssl
-    ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE
-    
-    connector = aiohttp.TCPConnector(ssl=ssl_context)
-    
-    async with aiohttp.ClientSession(connector=connector) as session:
-        try:
-            async with session.post(url, data=form, timeout=60) as resp:
-                # Get response text first to check what we received
-                text = await resp.text()
-                logger.info(f"Datagrab response status: {resp.status}, content-type: {resp.content_type}")
-                logger.info(f"Datagrab response text (first 500 chars): {text[:500]}")
-                
-                # Try to parse as JSON
-                try:
-                    import json
-                    result = json.loads(text)
-                    logger.info(f"Datagrab parsed response: {result}")
+    # Retry loop for transient errors
+    max_retries = 3
+    for attempt in range(max_retries):
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(url, headers=headers, data=form, timeout=30) as resp:
+                    result = await resp.json()
+                    logger.info(f"SafeCheck upload response (attempt {attempt+1}): {result}")
                     return result
-                except json.JSONDecodeError:
-                    logger.error(f"Failed to parse JSON, got HTML: {text[:200]}")
-                    return {"result": "error", "message": f"API вернул HTML вместо JSON. Возможно неверный API ключ или проблема с сервером"}
+            except Exception as e:
+                logger.exception(f"Failed to upload to SafeCheck API (attempt {attempt+1})")
+                if attempt == max_retries - 1:
+                    return {"error": 1, "msg": f"Ошибка загрузки: {str(e)}"}
+                await asyncio.sleep(2)
+    
+    return {"error": 1, "msg": "Не удалось загрузить файл после нескольких попыток"}
+
+
+async def safecheck_get_result(file_id: str, max_retries: int = 10, delay: int = 3) -> dict:
+    """
+    Poll SafeCheck API for check results.
+    
+    GET {endpoint}/getCheck?file_id=...
+    """
+    api_key = os.environ.get("SAFECHECK_API_KEY")
+    user_id = os.environ.get("SAFECHECK_USER_ID")
+    
+    endpoint = os.environ.get("SAFECHECK_ENDPOINT", "https://ru.safecheck.online/api")
+    url = f"{endpoint}/getCheck?file_id={file_id}"
+    
+    headers = {
+        'SC-API-KEY': api_key,
+        'SC-USER-ID': user_id
+    }
+    
+    async with aiohttp.ClientSession() as session:
+        for attempt in range(max_retries):
+            try:
+                await asyncio.sleep(delay if attempt > 0 else 0)
+                
+                async with session.get(url, headers=headers, timeout=30) as resp:
+                    result = await resp.json()
                     
-        except asyncio.TimeoutError:
-            logger.error("Timeout waiting for Datagrab API response")
-            return {"result": "error", "message": "Превышено время ожидания ответа от сервера"}
-        except Exception as e:
-            logger.exception("Failed to check PDF via Datagrab API")
-            return {"result": "error", "message": f"Ошибка при проверке: {str(e)}"}
+                    logger.info(f"SafeCheck poll attempt {attempt + 1}: status={result.get('result', {}).get('status')}")
+                    
+                    # Check for errors
+                    if result.get('error', 1) == 1:
+                        return result
+                    
+                    # Check if completed
+                    if result.get('result', {}).get('status') == 'completed':
+                        return result
+                    
+            except Exception as e:
+                logger.exception(f"Failed to poll SafeCheck API (attempt {attempt + 1})")
+                if attempt == max_retries - 1:
+                    return {"error": 1, "msg": f"Ошибка получения результата: {str(e)}"}
+        
+        return {"error": 1, "msg": "Превышено время ожидания результата"}
 
 
 def format_check_result(result: dict) -> str:
@@ -537,11 +572,32 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(document.file_id)
         pdf_bytes = await file.download_as_bytearray()
         
-        # Send to Datagrab API (returns immediate result)
-        result = await datagrab_check_pdf(bytes(pdf_bytes), document.file_name or "check.pdf")
+        # Step 1: Upload to SafeCheck API
+        upload_result = await safecheck_upload_pdf(bytes(pdf_bytes), document.file_name or "check.pdf")
         
+        if upload_result.get('error', 1) == 1:
+            error_msg = upload_result.get('msg', upload_result.get('message', 'Неизвестная ошибка'))
+            await msg.edit_text(f"❌ Ошибка загрузки: {error_msg}")
+            return
+
+        file_id = None
+        # SafeCheck may return file_id in different places
+        if isinstance(upload_result.get('result'), dict):
+            file_id = upload_result['result'].get('file_id')
+        if not file_id:
+            file_id = upload_result.get('file_id')
+
+        if not file_id:
+            await msg.edit_text("❌ Не получен file_id от SafeCheck API")
+            return
+
+        await msg.edit_text(f"⏳ Чек загружен (ID: {str(file_id)[:8]}...). Ожидание результата...")
+
+        # Step 2: Poll for results
+        check_result = await safecheck_get_result(file_id)
+
         # Format and send response
-        formatted_result = format_check_result(result)
+        formatted_result = format_check_result(check_result)
         await msg.edit_text(formatted_result)
         
     except Exception as e:
