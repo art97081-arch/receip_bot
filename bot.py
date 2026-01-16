@@ -168,175 +168,181 @@ async def datagrab_check_pdf(pdf_bytes: bytes, filename: str) -> dict:
                 text = await resp.text()
                 logger.info(f"Datagrab response status: {resp.status}, content-type: {resp.content_type}")
                 logger.debug(f"Datagrab response text (first 500 chars): {text[:500]}")
+                    """Format API response (Datagrab or SafeCheck) into a concise user-friendly message.
 
-                # Try parse JSON
-                try:
-                    parsed = json.loads(text)
-                    return parsed
-                except Exception:
-                    # Return a normalized error for downstream handling
-                    return {"result": "error", "message": "API вернул не-JSON ответ", "raw": text[:200]}
+                    Produces two main styles matching the samples you provided:
+                    - успешный (чек подлинный) — блок с подробными полями и рекомендацией принять
+                    - неуспешный (чек поддельный) — блок с перечислением нарушений и рекомендацией отклонить
+                    """
 
-        except asyncio.TimeoutError:
-            return {"result": "error", "message": "Превышено время ожидания ответа от сервера"}
-        except Exception as e:
-            logger.exception("Failed to check PDF via Datagrab API")
-            return {"result": "error", "message": f"Ошибка при проверке: {str(e)}"}
+                    def fmt_date(value):
+                        try:
+                            return datetime.fromtimestamp(int(value)).strftime('%d.%m.%Y %H:%M:%S')
+                        except Exception:
+                            return str(value)
 
+                    # Helper to render transaction data
+                    def render_check_data(cd: dict):
+                        lines = []
+                        if not cd:
+                            return lines
+                        # Sender
+                        if cd.get('sender_fio') or cd.get('sender_name'):
+                            name = cd.get('sender_fio') or cd.get('sender_name')
+                            lines.append('  📤 Отправитель:')
+                            lines.append(f'     • ФИО: {name}')
+                        # Recipient
+                        if cd.get('recipient_fio') or cd.get('recipient_name'):
+                            rname = cd.get('recipient_fio') or cd.get('recipient_name')
+                            lines.append('  📥 Получатель:')
+                            lines.append(f'     • ФИО: {rname}')
+                            if cd.get('recipient_req') or cd.get('recipient_account'):
+                                acct = cd.get('recipient_req') or cd.get('recipient_account')
+                                lines.append(f'     • Счет: {acct}')
+                            if cd.get('recipient_phone') or cd.get('phone'):
+                                ph = cd.get('recipient_phone') or cd.get('phone')
+                                lines.append(f'     • Телефон: {ph}')
+                        # Sum / status / date / id
+                        if cd.get('sum'):
+                            lines.append(f'  💰 Сумма: {cd.get("sum")}')
+                        if cd.get('status'):
+                            lines.append(f'  ✅ Статус: {cd.get("status")}')
+                        if cd.get('date'):
+                            lines.append(f'  🕐 Время: {fmt_date(cd.get("date"))}')
+                        # id fields
+                        if cd.get('id') or cd.get('doc_id') or cd.get('check_id'):
+                            cid = cd.get('id') or cd.get('doc_id') or cd.get('check_id')
+                            lines.append(f'  🆔 ID документа: {cid}')
+                        return lines
 
-def format_check_result(result: dict) -> str:
-    """Format API response (Datagrab or SafeCheck) into user-friendly message."""
-    # Handle SafeCheck-style responses (async polling result in 'result' dict)
-    if isinstance(result.get("result"), dict):
-        # SafeCheck
-        if result.get("error", 1) == 1:
-            return f"❌ Ошибка: {result.get('msg', 'Неизвестная ошибка')}"
+                    # Distinguish SafeCheck (result.result is dict) vs Datagrab (sync response)
+                    if isinstance(result.get('result'), dict):
+                        # SafeCheck-style
+                        if result.get('error', 1) == 1:
+                            return f"❌ Ошибка: {result.get('msg', 'Неизвестная ошибка')}"
 
-        check_result = result.get("result", {})
-        color = check_result.get("color", "")
-        is_original = check_result.get("is_original", False)
-        recommendation = check_result.get("recommendation", "")
-        verifier = check_result.get("verifier", "")
-        struct_passed = check_result.get("struct_passed", True)
-        struct_result = check_result.get("struct_result", "")
-        device_error = check_result.get("device_error", False)
-        check_data = check_result.get("check_data", {})
+                        r = result.get('result', {})
+                        color = r.get('color', '')
+                        is_original = r.get('is_original', False)
+                        struct_passed = r.get('struct_passed', False)
+                        rec = r.get('recommendation', '')
+                        verifier = r.get('verifier', '')
+                        check_data = r.get('check_data', {})
 
-        lines = []
-        # Status header based on color
-        if color == "white":
-            lines.append("✅ ЧЕК ПОДЛИННЫЙ")
-            lines.append(f"\n🔍 Статус: {color.upper()} (чистый)")
-        elif color == "yellow":
-            lines.append("⚠️ ЧЕК ПОДОЗРИТЕЛЬНЫЙ")
-            lines.append(f"\n🔍 Статус: {color.upper()} (требует внимания)")
-        elif color in ["red", "black"]:
-            lines.append("🚫 ЧЕК ПОДДЕЛЬНЫЙ!")
-            lines.append(f"\n🔍 Статус: {color.upper()} (фальшивый)")
-        elif color == "not_supported":
-            lines.append("❓ БАНК НЕ ПОДДЕРЖИВАЕТСЯ")
-            lines.append(f"\n� Статус: {color}")
-        else:
-            lines.append(f"ℹ️ Статус: {color}")
+                        if color == 'white' or (is_original and struct_passed):
+                            lines = []
+                            lines.append('✅ ЧЕК ПОДЛИННЫЙ')
+                            lines.append('\n🎯 Все проверки пройдены успешно')
+                            if verifier:
+                                lines.append(f'\n💬 ✅ Чек {verifier}')
+                            lines.append('\n� Результат проверки:')
+                            if r.get('bank'):
+                                lines.append(f'🏦 Банк: {r.get("bank")}')
+                            if r.get('profile'):
+                                lines.append(f'📄 Профиль: {r.get("profile")}')
 
-        # Verification details
-        lines.append(f"\n📋 Результаты проверки:\n")
-        lines.append(f"{'✅' if is_original else '❌'} Оригинальность: {'Подтверждена' if is_original else 'Не подтверждена'}")
-        lines.append(f"{'✅' if struct_passed else '❌'} Структура PDF: {'Корректна' if struct_passed else 'Нарушена'} ({struct_result})")
+                            lines.append('\n🔍 Детальная проверка:')
+                            lines.append(f'   {"✅" if is_original else "❌"} Подлинность: {"Подтверждена" if is_original else "Не подтверждена"}')
+                            lines.append(f'   {"✅" if r.get("is_original", False) else "❌"} Оригинальность: {"Оригинал банка" if r.get("is_original", False) else "Не оригинал"}')
+                            lines.append(f'   {"✅" if struct_passed else "❌"} Структура PDF: {"Корректна" if struct_passed else "Нарушена"}')
+                            lines.append(f'   {"✅" if r.get("recognized", False) or r.get("is_recognized", False) else "❌"} Распознавание: {"Успешно" if r.get("recognized", False) or r.get("is_recognized", False) else "Не успешно"}')
 
-        if device_error:
-            lines.append(f"⚠️ Ошибка устройства: Файл сохранен некорректно")
+                            # Transaction data
+                            tx = render_check_data(check_data)
+                            if tx:
+                                lines.append('\n💳 Данные транзакции:')
+                                lines.extend(tx)
 
-        # Detailed violations if check failed
-        violations = []
-        if not is_original:
-            violations.append("❌ Чек не является оригиналом")
-            violations.append("   ℹ️ Документ был изменен или пересоздан")
+                            lines.append('\n✅ РЕКОМЕНДАЦИЯ: Чек можно принять')
+                            lines.append('   └─ Все проверки подлинности пройдены')
+                            return '\n'.join(lines)
+                        else:
+                            # Failure case for SafeCheck
+                            lines = []
+                            lines.append('🚫 ЧЕК ПОДДЕЛЬНЫЙ!')
+                            lines.append('\n🔴 Обнаружены следующие нарушения:')
+                            violations = []
+                            if not is_original:
+                                violations.append('❌ Чек не прошел проверку подлинности')
+                                violations.append('   └─ Подпись и метаданные не соответствуют оригиналу банка')
+                            if not struct_passed:
+                                violations.append('❌ Нарушена структура PDF файла')
+                                violations.append('   └─ Файл не соответствует оригинальному формату банка')
+                                violations.append('   📊 Параметры нарушения:')
+                                violations.append('      • Некорректные метаданные документа')
+                                violations.append('      • Отсутствие цифровой подписи банка')
+                                violations.append('      • Изменена структура объектов PDF')
+                                violations.append('      • Несоответствие шрифтов и кодировки')
+                            if r.get('device_error'):
+                                violations.append('❌ Обнаружена ошибка сохранения файла')
 
-        if not struct_passed:
-            violations.append(f"❌ Структура PDF нарушена: {struct_result}")
-            try:
-                if "/" in struct_result:
-                    passed, total = struct_result.split("/")
-                    failed = int(total) - int(passed)
-                    violations.append(f"   ℹ️ Не пройдено {failed} из {total} проверок структуры:")
-            except Exception:
-                pass
+                            lines.extend(violations)
+                            if r.get('message'):
+                                lines.append('\n💬 Сообщение от сервера:')
+                                lines.append(f'   ❌ {r.get("message")}')
 
-        if device_error:
-            violations.append("❌ Обнаружена ошибка сохранения файла")
-            violations.append("   ℹ️ Файл был создан или изменен некорректно")
+                            lines.append('\n⚠️ РЕКОМЕНДАЦИЯ: НЕ ПРИНИМАЙТЕ ЭТОТ ЧЕК!')
+                            lines.append('┗━ Чек был изменен или создан искусственно')
+                            lines.append('┗━ Высокий риск мошенничества')
+                            return '\n'.join(lines)
 
-        if violations:
-            lines.append(f"\n⚠️ Обнаруженные нарушения:")
-            for v in violations:
-                lines.append(f"  {v}")
+                    # Datagrab-style (synchronous) responses
+                    # Handle well-known errors
+                    if result.get('result') in ('forbidden', 'unpaid', 'error'):
+                        if result.get('result') == 'forbidden':
+                            return '❌ Ошибка: неверный API ключ'
+                        if result.get('result') == 'unpaid':
+                            return '❌ Истек оплаченный период API'
+                        return f"❌ Ошибка при проверке: {result.get('message', 'Неизвестная ошибка')}"
 
-        lines.append(f"\n💡 Рекомендация: {recommendation}")
-        lines.append(f"🏦 Верификатор: {verifier}")
+                    # Regular datagrab success/fail
+                    is_fake = result.get('is_fake', False)
+                    is_mod = result.get('is_mod', False)
+                    profile = result.get('profile', '')
+                    bank = result.get('result', '')
+                    check_data = result.get('check_data', {})
 
-        # Check data if present
-        if check_data:
-            lines.append(f"\n� Данные чека:")
-            if "sender_fio" in check_data:
-                lines.append(f"  Отправитель: {check_data['sender_fio']}")
-            if "sender_bank" in check_data:
-                lines.append(f"  Банк отправителя: {check_data['sender_bank']}")
-            if "recipient_fio" in check_data:
-                lines.append(f"  Получатель: {check_data['recipient_fio']}")
-            if "recipient_bank" in check_data:
-                lines.append(f"  Банк получателя: {check_data['recipient_bank']}")
-            if "sum" in check_data:
-                lines.append(f"  Сумма: {check_data['sum']}")
-            if "status" in check_data:
-                lines.append(f"  Статус: {check_data['status']}")
-            if "date" in check_data:
-                try:
-                    dt = datetime.fromtimestamp(int(check_data['date']))
-                    lines.append(f"  Дата: {dt.strftime('%d.%m.%Y %H:%M:%S')}")
-                except Exception:
-                    lines.append(f"  Дата: {check_data['date']}")
+                    if not is_fake and not is_mod:
+                        lines = []
+                        lines.append('✅ ЧЕК ПОДЛИННЫЙ')
+                        lines.append('\n🎯 Все проверки пройдены успешно')
+                        if bank:
+                            lines.append(f'\n📋 Результат проверки:')
+                            lines.append(f'🏦 Банк: {bank}')
+                        if profile:
+                            lines.append(f'📄 Профиль: {profile}')
 
-        # Final recommendation based on color
-        if color in ["red", "black"]:
-            lines.append("\n⚠️ РЕКОМЕНДАЦИЯ: НЕ ПРИНИМАЙТЕ ЭТОТ ЧЕК!")
-            lines.append("┗━ Обнаружены признаки подделки")
-        elif color == "yellow":
-            lines.append("\n⚠️ ВНИМАНИЕ: Проведите дополнительную проверку")
-        elif color == "white":
-            lines.append("\n✅ Чек прошел все проверки")
+                        lines.append('\n🔍 Детальная проверка:')
+                        lines.append('   ✅ Подлинность: Подтверждена')
+                        lines.append('   ✅ Оригинальность: Оригинал банка')
+                        lines.append('   ✅ Структура PDF: Корректна')
+                        lines.append('   ✅ Распознавание: Успешно')
 
-        return "\n".join(lines)
+                        tx = render_check_data(check_data)
+                        if tx:
+                            lines.append('\n💳 Данные транзакции:')
+                            lines.extend(tx)
 
-    # Otherwise assume Datagrab-style response (synchronous)
-    # Handle errors
-    if result.get("result") == "forbidden":
-        return "❌ Ошибка: неверный API ключ"
-    if result.get("result") == "unpaid":
-        return "❌ Истек оплаченный период API"
-    if result.get("result") == "error":
-        return f"❌ Ошибка при проверке: {result.get('message', 'Неизвестная ошибка')}"
+                        lines.append('\n✅ РЕКОМЕНДАЦИЯ: Чек можно принять')
+                        lines.append('   └─ Все проверки подлинности пройдены')
+                        return '\n'.join(lines)
+                    else:
+                        # Datagrab reports fake or modified
+                        lines = []
+                        lines.append('🚫 ЧЕК ПОДДЕЛЬНЫЙ!')
+                        lines.append('\n� Обнаружены следующие нарушения:')
+                        if is_fake:
+                            lines.append('❌ Чек не прошел проверку подлинности')
+                            lines.append('   └─ Подпись и метаданные не соответствуют оригиналу банка')
+                        if is_mod:
+                            lines.append('❌ Чек был пересохранен / изменён')
+                        if result.get('message'):
+                            lines.append('\n💬 Сообщение от сервера:')
+                            lines.append(f'   ❌ {result.get("message")}')
 
-    # Datagrab fields
-    result_type = result.get("result", "")
-    profile = result.get("profile", "")
-    is_fake = result.get("is_fake", False)
-    is_mod = result.get("is_mod", False)
-    is_unrec = result.get("is_unrec", False)
-    compliance_status = result.get("compliance_status", True)
-    message = result.get("message", "")
-    message2 = result.get("message2", "")
-    last_checks = result.get("last_checks", 0)
-    check_data = result.get("check_data", {})
-
-    # Handle special datagrab result types
-    if result_type == "unrec":
-        lines = ["❓ ЧЕК НЕ РАСПОЗНАН"]
-        lines.append("\n🔍 Причины:")
-        if is_unrec:
-            lines.append("❌ Система не смогла распознать чек")
-        if not compliance_status:
-            lines.append("❌ Некорректная структура PDF")
-        if message:
-            lines.append(f"\n💬 {message}")
-        return "\n".join(lines)
-
-    # Format successful datagrab-like response
-    lines = []
-    if message:
-        lines.append(message)
-    lines.append(f"\n📋 Результат проверки:")
-    lines.append(f"Банк: {result_type}")
-    if profile:
-        lines.append(f"Профиль: {profile}")
-
-    if is_fake:
-        lines.append("⚠️ Чек признан поддельным")
-    if is_mod:
-        lines.append("⚠️ Чек был пересохранен")
-    if is_unrec:
-        lines.append("⚠️ Чек не распознан")
-    if not compliance_status:
+                        lines.append('\n⚠️ РЕКОМЕНДАЦИЯ: НЕ ПРИНИМАЙТЕ ЭТОТ ЧЕК!')
+                        lines.append('┗━ Чек был изменен или создан искусственно')
+                        return '\n'.join(lines)
         lines.append("⚠️ Ошибки в структуре PDF")
 
     try:
@@ -479,6 +485,158 @@ def format_check_result(result: dict) -> str:
     elif color == "white":
         lines.append("\n✅ Чек прошел все проверки")
     
+    return "\n".join(lines)
+
+
+def format_check_result(result: dict) -> str:
+    """Format datagrab/safecheck API response into a user-friendly Russian message.
+
+    This is a cleaned and consolidated version taken from the backup implementation.
+    """
+    # Common simple error cases
+    if result.get("result") == "forbidden":
+        return "❌ Ошибка: неверный API ключ"
+    if result.get("result") == "unpaid":
+        return "❌ Истек оплаченный период API"
+    if result.get("result") == "error":
+        return f"❌ Ошибка при проверке: {result.get('message', 'Неизвестная ошибка')}"
+
+    result_type = result.get("result", "")
+    message = result.get("message", "")
+    message2 = result.get("message2", "")
+    is_fake = result.get("is_fake", False)
+    is_mod = result.get("is_mod", False)
+    compliance_status = result.get("compliance_status", True)
+    is_unrec = result.get("is_unrec", False)
+
+    # Unrecognized check
+    if result_type == "unrec":
+        lines = ["❓ ЧЕК НЕ РАСПОЗНАН", "", "🔍 Причины:"]
+        violations = []
+        if is_unrec:
+            violations.append("❌ is_unrec = true — Система не смогла распознать чек")
+        if not compliance_status:
+            violations.append("❌ compliance_status = false — Некорректная структура PDF")
+        if violations:
+            lines.extend(violations)
+        if message:
+            lines.append("")
+            lines.append(f"💬 {message}")
+        if message2:
+            lines.append(f"ℹ️ {message2}")
+        lines.append("")
+        lines.append("⚠️ Возможные причины:")
+        lines.append("• Неподдерживаемый формат чека")
+        lines.append("• Чек от неизвестного банка")
+        lines.append("• Повреждение файла")
+        return "\n".join(lines)
+
+    # Fake check
+    if result_type == "fake":
+        lines = ["🚫 ЧЕК ПОДДЕЛЬНЫЙ!", "", "🔴 Обнаружены следующие нарушения:"]
+        violations = []
+        if is_fake:
+            violations.append("❌ is_fake = true — Чек не прошел проверку подлинности")
+        if not compliance_status:
+            violations.append("❌ compliance_status = false — Нарушена структура PDF файла")
+            violations.append("   └─ Файл не соответствует оригинальному формату банка")
+        if is_mod:
+            violations.append("❌ is_mod = true — Обнаружены следы модификации документа")
+        if violations:
+            lines.extend(violations)
+        if message:
+            lines.append("")
+            lines.append("💬 Сообщение от сервера:")
+            lines.append(f"   {message}")
+        if message2:
+            lines.append("")
+            lines.append("ℹ️ Дополнительно:")
+            lines.append(f"   {message2}")
+        lines.append("")
+        lines.append("⚠️ РЕКОМЕНДАЦИЯ: НЕ ПРИНИМАЙТЕ ЭТОТ ЧЕК!")
+        lines.append("┗━ Чек был изменен или создан искусственно")
+        return "\n".join(lines)
+
+    # Modified check
+    if result_type == "mod":
+        lines = ["⚠️ ЧЕК МОДИФИЦИРОВАН", "", "🔍 Обнаружено:"]
+        violations = []
+        if is_mod:
+            violations.append("❌ is_mod = true — Чек был пересохранен")
+            violations.append("   └─ Использован виртуальный принтер или редактор PDF")
+        if not compliance_status:
+            violations.append("❌ compliance_status = false — Структура PDF изменена")
+        if violations:
+            lines.extend(violations)
+        lines.append("")
+        lines.append("⚠️ Это означает:")
+        lines.append("• Файл не является оригиналом из банка")
+        lines.append("• Проверка подлинности невозможна")
+        lines.append("• Чек мог быть отредактирован")
+        if message:
+            lines.append("")
+            lines.append(f"💬 {message}")
+        return "\n".join(lines)
+
+    if result_type == "size":
+        return "❌ Размер PDF файла не соответствует оригинальному"
+
+    # Default / success-like formatting
+    profile = result.get("profile", "")
+    last_checks = result.get("last_checks", 0)
+
+    lines = []
+    if message:
+        lines.append(message)
+    lines.append("")
+    lines.append("📋 Результат проверки:")
+    lines.append(f"Банк: {result_type}")
+    if profile:
+        lines.append(f"Профиль: {profile}")
+
+    if is_fake:
+        lines.append("⚠️ Чек признан поддельным")
+    if is_mod:
+        lines.append("⚠️ Чек был пересохранен")
+    if is_unrec:
+        lines.append("⚠️ Чек не распознан")
+    if not compliance_status:
+        lines.append("⚠️ Ошибки в структуре PDF")
+
+    try:
+        last_checks_int = int(last_checks) if last_checks else 0
+        if last_checks_int > 0:
+            lines.append(f"🔄 Ранее проверялся: {last_checks_int} раз(а)")
+    except Exception:
+        pass
+
+    check_data = result.get("check_data", {})
+    if check_data:
+        lines.append("")
+        lines.append("💳 Данные чека:")
+        if "sender_name" in check_data:
+            lines.append(f"Отправитель: {check_data['sender_name']}")
+        if "sender_acc" in check_data:
+            lines.append(f"Счет отправителя: ****{check_data['sender_acc']}")
+        if "remitte_name" in check_data:
+            lines.append(f"Получатель: {check_data['remitte_name']}")
+        if "remitte_acc" in check_data:
+            lines.append(f"Счет получателя: ****{check_data['remitte_acc']}")
+        if "remitte_tel" in check_data:
+            lines.append(f"Телефон получателя: {check_data['remitte_tel']}")
+        if "sum" in check_data:
+            lines.append(f"Сумма: {check_data['sum']} ₽")
+        if "status" in check_data:
+            lines.append(f"Статус: {check_data['status']}")
+        if "payment_time" in check_data:
+            try:
+                dt = datetime.fromtimestamp(int(check_data['payment_time']))
+                lines.append(f"Время: {dt.strftime('%d.%m.%Y %H:%M:%S')}")
+            except Exception:
+                lines.append(f"Время: {check_data['payment_time']}")
+        if "doc_id" in check_data:
+            lines.append(f"ID документа: {check_data['doc_id']}")
+
     return "\n".join(lines)
 
 
