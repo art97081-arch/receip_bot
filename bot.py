@@ -134,55 +134,54 @@ async def safecheck_get_result(file_id: str, max_retries: int = 10, delay: int =
         
         return {"error": 1, "msg": "Превышено время ожидания результата"}
 
+async def datagrab_check_pdf(pdf_bytes: bytes, filename: str) -> dict:
+    """
+    Upload and check PDF file via Datagrab/pdfchecker API.
 
-    async def datagrab_check_pdf(pdf_bytes: bytes, filename: str) -> dict:
-        """
-        Upload and check PDF file via Datagrab/pdfchecker API.
+    POST {endpoint}/upload.php?key={api_key}
+    Returns immediate result (JSON) or HTML on error.
+    """
+    api_key = os.environ.get("DATAGRAB_API_KEY")
+    if not api_key:
+        raise RuntimeError("DATAGRAB_API_KEY not set in environment")
 
-        POST {endpoint}/upload.php?key={api_key}
-        Returns immediate result (JSON) or HTML on error.
-        """
-        api_key = os.environ.get("DATAGRAB_API_KEY")
-        if not api_key:
-            raise RuntimeError("DATAGRAB_API_KEY not set in environment")
+    endpoint = os.environ.get("DATAGRAB_ENDPOINT", "https://api.datagrab.ru")
+    url = f"{endpoint}/upload.php?key={api_key}"
 
-        endpoint = os.environ.get("DATAGRAB_ENDPOINT", "https://api.datagrab.ru")
-        url = f"{endpoint}/upload.php?key={api_key}"
+    # Prepare multipart form data
+    form = aiohttp.FormData()
+    form.add_field('file', pdf_bytes, filename=filename, content_type='application/pdf')
 
-        # Prepare multipart form data
-        form = aiohttp.FormData()
-        form.add_field('file', pdf_bytes, filename=filename, content_type='application/pdf')
+    # Some hosts may have certificate issues; create an SSL context option if needed
+    try:
+        import ssl
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
+    except Exception:
+        connector = None
 
-        # Some hosts may have certificate issues; create an SSL context option if needed
+    async with aiohttp.ClientSession(connector=connector) as session:
         try:
-            import ssl
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-            connector = aiohttp.TCPConnector(ssl=ssl_context)
-        except Exception:
-            connector = None
+            async with session.post(url, data=form, timeout=60) as resp:
+                text = await resp.text()
+                logger.info(f"Datagrab response status: {resp.status}, content-type: {resp.content_type}")
+                logger.debug(f"Datagrab response text (first 500 chars): {text[:500]}")
 
-        async with aiohttp.ClientSession(connector=connector) as session:
-            try:
-                async with session.post(url, data=form, timeout=60) as resp:
-                    text = await resp.text()
-                    logger.info(f"Datagrab response status: {resp.status}, content-type: {resp.content_type}")
-                    logger.debug(f"Datagrab response text (first 500 chars): {text[:500]}")
+                # Try parse JSON
+                try:
+                    parsed = json.loads(text)
+                    return parsed
+                except Exception:
+                    # Return a normalized error for downstream handling
+                    return {"result": "error", "message": "API вернул не-JSON ответ", "raw": text[:200]}
 
-                    # Try parse JSON
-                    try:
-                        parsed = json.loads(text)
-                        return parsed
-                    except Exception:
-                        # Return a normalized error for downstream handling
-                        return {"result": "error", "message": "API вернул не-JSON ответ", "raw": text[:200]}
-
-            except asyncio.TimeoutError:
-                return {"result": "error", "message": "Превышено время ожидания ответа от сервера"}
-            except Exception as e:
-                logger.exception("Failed to check PDF via Datagrab API")
-                return {"result": "error", "message": f"Ошибка при проверке: {str(e)}"}
+        except asyncio.TimeoutError:
+            return {"result": "error", "message": "Превышено время ожидания ответа от сервера"}
+        except Exception as e:
+            logger.exception("Failed to check PDF via Datagrab API")
+            return {"result": "error", "message": f"Ошибка при проверке: {str(e)}"}
 
 
 def format_check_result(result: dict) -> str:
