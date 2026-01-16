@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Telegram bot for checking bank receipts via Datagrab API.
+Telegram bot for checking bank receipts via datagrab API.
 
 Features:
 - /start - help
-- Send PDF file - check receipt via Datagrab API (allowed users only)
+- Send PDF file - check receipt via datagrab API (allowed users only)
 - /allow <user_id> - OWNER only, add allowed user
 - /revoke <user_id> - OWNER only, remove allowed user
 - /list_allowed - OWNER only, list allowed user IDs
 
-Security: BOT token and Datagrab API key must be provided via environment variables.
+Security: BOT token and DATAGRAB API key must be provided via environment variables.
 Do NOT commit secrets to the repo.
 """
 import asyncio
@@ -47,162 +47,205 @@ def save_allowed(ids: List[int]):
         json.dump([int(x) for x in ids], f, ensure_ascii=False, indent=2)
 
 
-async def datagrab_check_pdf(pdf_bytes: bytes, filename: str) -> dict:
+async def safecheck_upload_pdf(pdf_bytes: bytes, filename: str) -> dict:
     """
-    Upload and check PDF file via Datagrab/pdfchecker API.
-
-    POST {endpoint}/upload.php?key={api_key}
-    Returns immediate result (JSON) or HTML on error.
+    Upload PDF file to SafeCheck API for bank receipt verification.
+    
+    POST https://ru.safecheck.online/api/check
+    Returns file_id for polling.
     """
-    api_key = os.environ.get("DATAGRAB_API_KEY")
+    api_key = os.environ.get("SAFECHECK_API_KEY")
+    user_id = os.environ.get("SAFECHECK_USER_ID")
+    
     if not api_key:
-        raise RuntimeError("DATAGRAB_API_KEY not set in environment")
-
-    endpoint = os.environ.get("DATAGRAB_ENDPOINT", "https://api.datagrab.ru")
-    url = f"{endpoint}/upload.php?key={api_key}"
-
+        raise RuntimeError("SAFECHECK_API_KEY not set in environment")
+    if not user_id:
+        raise RuntimeError("SAFECHECK_USER_ID not set in environment")
+    
+    endpoint = os.environ.get("SAFECHECK_ENDPOINT", "https://ru.safecheck.online/api")
+    url = f"{endpoint}/check"
+    
+    headers = {
+        'SC-API-KEY': api_key,
+        'SC-USER-ID': user_id
+    }
+    
     # Prepare multipart form data
     form = aiohttp.FormData()
     form.add_field('file', pdf_bytes, filename=filename, content_type='application/pdf')
-
-    # Some hosts may have certificate issues; create an SSL context option if needed
-    try:
-        import ssl
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
-        connector = aiohttp.TCPConnector(ssl=ssl_context)
-    except Exception:
-        connector = None
-
-    async with aiohttp.ClientSession(connector=connector) as session:
+    
+    async with aiohttp.ClientSession() as session:
         try:
-            async with session.post(url, data=form, timeout=60) as resp:
-                text = await resp.text()
-                logger.info(f"Datagrab response status: {resp.status}, content-type: {resp.content_type}")
-                logger.debug(f"Datagrab response text (first 500 chars): {text[:500]}")
-
-                # Try to parse JSON response
-                try:
-                    return json.loads(text)
-                except Exception:
-                    # Fallback: if resp.json works use it, otherwise return raw text in error
-                    try:
-                        return await resp.json()
-                    except Exception:
-                        return {"error": 1, "msg": "Invalid response from Datagrab", "text": text}
+            async with session.post(url, headers=headers, data=form, timeout=30) as resp:
+                result = await resp.json()
+                logger.info(f"SafeCheck upload response: {result}")
+                return result
         except Exception as e:
-            logger.exception("Failed to call Datagrab API")
-            return {"error": 1, "msg": f"Ошибка запроса: {str(e)}"}
+            logger.exception("Failed to upload to SafeCheck API")
+            return {"error": 1, "msg": f"Ошибка загрузки: {str(e)}"}
 
+
+async def safecheck_get_result(file_id: str, max_retries: int = 10, delay: int = 3) -> dict:
+    """
+    Poll SafeCheck API for check results.
+    
+    GET https://ru.safecheck.online/api/getCheck?file_id=...
+    """
+    api_key = os.environ.get("SAFECHECK_API_KEY")
+    user_id = os.environ.get("SAFECHECK_USER_ID")
+    
+    endpoint = os.environ.get("SAFECHECK_ENDPOINT", "https://ru.safecheck.online/api")
+    url = f"{endpoint}/getCheck?file_id={file_id}"
+    
+    headers = {
+        'SC-API-KEY': api_key,
+        'SC-USER-ID': user_id
+    }
+    
+    async with aiohttp.ClientSession() as session:
+        for attempt in range(max_retries):
+            try:
+                await asyncio.sleep(delay if attempt > 0 else 0)
+                
+                async with session.get(url, headers=headers, timeout=30) as resp:
+                    result = await resp.json()
+                    
+                    logger.info(f"SafeCheck poll attempt {attempt + 1}: status={result.get('result', {}).get('status')}")
+                    
+                    # Check for errors
+                    if result.get('error', 1) == 1:
+                        return result
+                    
+                    # Check if completed
+                    if result.get('result', {}).get('status') == 'completed':
+                        return result
+                    
+            except Exception as e:
+                logger.exception(f"Failed to poll SafeCheck API (attempt {attempt + 1})")
+                if attempt == max_retries - 1:
+                    return {"error": 1, "msg": f"Ошибка получения результата: {str(e)}"}
+        
+        return {"error": 1, "msg": "Превышено время ожидания результата"}
 
 
 def format_check_result(result: dict) -> str:
-    """Format datagrab/safecheck API response into a user-friendly Russian message.
-
-    This is a cleaned and consolidated version taken from the backup implementation.
-    """
-    # Common simple error cases
+    """Format datagrab API response into user-friendly message."""
+    
+    # Handle errors
     if result.get("result") == "forbidden":
         return "❌ Ошибка: неверный API ключ"
-    if result.get("result") == "unpaid":
+    elif result.get("result") == "unpaid":
         return "❌ Истек оплаченный период API"
-    if result.get("result") == "error":
+    elif result.get("result") == "error":
         return f"❌ Ошибка при проверке: {result.get('message', 'Неизвестная ошибка')}"
-
+    
+    # Handle non-recognized checks
     result_type = result.get("result", "")
     message = result.get("message", "")
     message2 = result.get("message2", "")
     is_fake = result.get("is_fake", False)
     is_mod = result.get("is_mod", False)
     compliance_status = result.get("compliance_status", True)
-    is_unrec = result.get("is_unrec", False)
-
-    # Unrecognized check
+    
     if result_type == "unrec":
-        lines = ["❓ ЧЕК НЕ РАСПОЗНАН", "", "🔍 Причины:"]
+        lines = ["❓ ЧЕК НЕ РАСПОЗНАН"]
+        lines.append("\n🔍 Причины:")
+        
         violations = []
         if is_unrec:
             violations.append("❌ is_unrec = true — Система не смогла распознать чек")
         if not compliance_status:
             violations.append("❌ compliance_status = false — Некорректная структура PDF")
+        
         if violations:
             lines.extend(violations)
+        
         if message:
-            lines.append("")
-            lines.append(f"💬 {message}")
+            lines.append(f"\n💬 {message}")
         if message2:
             lines.append(f"ℹ️ {message2}")
-        lines.append("")
-        lines.append("⚠️ Возможные причины:")
+        
+        lines.append("\n⚠️ Возможные причины:")
         lines.append("• Неподдерживаемый формат чека")
         lines.append("• Чек от неизвестного банка")
         lines.append("• Повреждение файла")
+        
         return "\n".join(lines)
-
-    # Fake check
-    if result_type == "fake":
-        lines = ["🚫 ЧЕК ПОДДЕЛЬНЫЙ!", "", "🔴 Обнаружены следующие нарушения:"]
+    
+    elif result_type == "fake":
+        lines = ["🚫 ЧЕК ПОДДЕЛЬНЫЙ!"]
+        lines.append("\n� Обнаружены следующие нарушения:\n")
+        
+        # Список конкретных проблем
         violations = []
+        
         if is_fake:
             violations.append("❌ is_fake = true — Чек не прошел проверку подлинности")
+        
         if not compliance_status:
             violations.append("❌ compliance_status = false — Нарушена структура PDF файла")
             violations.append("   └─ Файл не соответствует оригинальному формату банка")
+        
         if is_mod:
             violations.append("❌ is_mod = true — Обнаружены следы модификации документа")
+        
+        # Если есть нарушения, показываем их
         if violations:
             lines.extend(violations)
+        
+        # Добавляем сообщения от API
         if message:
-            lines.append("")
-            lines.append("💬 Сообщение от сервера:")
+            lines.append(f"\n� Сообщение от сервера:")
             lines.append(f"   {message}")
+        
         if message2:
-            lines.append("")
-            lines.append("ℹ️ Дополнительно:")
+            lines.append(f"\nℹ️ Дополнительно:")
             lines.append(f"   {message2}")
-        lines.append("")
-        lines.append("⚠️ РЕКОМЕНДАЦИЯ: НЕ ПРИНИМАЙТЕ ЭТОТ ЧЕК!")
+        
+        # Финальное предупреждение
+        lines.append("\n⚠️ РЕКОМЕНДАЦИЯ: НЕ ПРИНИМАЙТЕ ЭТОТ ЧЕК!")
         lines.append("┗━ Чек был изменен или создан искусственно")
+        
         return "\n".join(lines)
-
-    # Modified check
-    if result_type == "mod":
-        lines = ["⚠️ ЧЕК МОДИФИЦИРОВАН", "", "🔍 Обнаружено:"]
+    
+    elif result_type == "mod":
+        lines = ["⚠️ ЧЕК МОДИФИЦИРОВАН"]
+        lines.append("\n🔍 Обнаружено:")
+        
         violations = []
         if is_mod:
             violations.append("❌ is_mod = true — Чек был пересохранен")
             violations.append("   └─ Использован виртуальный принтер или редактор PDF")
+        
         if not compliance_status:
             violations.append("❌ compliance_status = false — Структура PDF изменена")
+        
         if violations:
             lines.extend(violations)
-        lines.append("")
-        lines.append("⚠️ Это означает:")
+        
+        lines.append("\n⚠️ Это означает:")
         lines.append("• Файл не является оригиналом из банка")
         lines.append("• Проверка подлинности невозможна")
         lines.append("• Чек мог быть отредактирован")
+        
         if message:
-            lines.append("")
-            lines.append(f"💬 {message}")
+            lines.append(f"\n💬 {message}")
+        
         return "\n".join(lines)
-
-    if result_type == "size":
+    
+    elif result_type == "size":
         return "❌ Размер PDF файла не соответствует оригинальному"
-
-    # Default / success-like formatting
+    
+    # Format successful check
     profile = result.get("profile", "")
+    is_unrec = result.get("is_unrec", False)
     last_checks = result.get("last_checks", 0)
-
-    lines = []
-    if message:
-        lines.append(message)
-    lines.append("")
-    lines.append("📋 Результат проверки:")
+    
+    lines = [message]
+    lines.append(f"\n📋 Результат проверки:")
     lines.append(f"Банк: {result_type}")
-    if profile:
-        lines.append(f"Профиль: {profile}")
-
+    lines.append(f"Профиль: {profile}")
+    
     if is_fake:
         lines.append("⚠️ Чек признан поддельным")
     if is_mod:
@@ -211,18 +254,19 @@ def format_check_result(result: dict) -> str:
         lines.append("⚠️ Чек не распознан")
     if not compliance_status:
         lines.append("⚠️ Ошибки в структуре PDF")
-
+    
+    # Convert last_checks to int (API may return string)
     try:
         last_checks_int = int(last_checks) if last_checks else 0
         if last_checks_int > 0:
             lines.append(f"🔄 Ранее проверялся: {last_checks_int} раз(а)")
-    except Exception:
+    except (ValueError, TypeError):
         pass
-
+    
+    # Add check data if present
     check_data = result.get("check_data", {})
     if check_data:
-        lines.append("")
-        lines.append("💳 Данные чека:")
+        lines.append(f"\n💳 Данные чека:")
         if "sender_name" in check_data:
             lines.append(f"Отправитель: {check_data['sender_name']}")
         if "sender_acc" in check_data:
@@ -241,11 +285,11 @@ def format_check_result(result: dict) -> str:
             try:
                 dt = datetime.fromtimestamp(int(check_data['payment_time']))
                 lines.append(f"Время: {dt.strftime('%d.%m.%Y %H:%M:%S')}")
-            except Exception:
+            except:
                 lines.append(f"Время: {check_data['payment_time']}")
         if "doc_id" in check_data:
             lines.append(f"ID документа: {check_data['doc_id']}")
-
+    
     return "\n".join(lines)
 
 
@@ -259,7 +303,7 @@ def is_owner(user_id: int) -> bool:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "👋 Бот для проверки банковских чеков через Datagrab API\n\n"
+        "👋 Бот для проверки банковских чеков через datagrab API\n\n"
         "📎 Отправьте PDF файл чека для проверки\n\n"
         "Команды владельца:\n"
         "/allow <user_id> - добавить пользователя\n"
@@ -300,9 +344,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(document.file_id)
         pdf_bytes = await file.download_as_bytearray()
         
-        # Send to Datagrab/pdfchecker API (synchronous response)
+        # Send to datagrab API
         result = await datagrab_check_pdf(bytes(pdf_bytes), document.file_name or "check.pdf")
-
+        
         # Format and send response
         formatted_result = format_check_result(result)
         await msg.edit_text(formatted_result)
