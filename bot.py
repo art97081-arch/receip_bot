@@ -135,6 +135,56 @@ async def safecheck_get_result(file_id: str, max_retries: int = 10, delay: int =
         return {"error": 1, "msg": "Превышено время ожидания результата"}
 
 
+    async def datagrab_check_pdf(pdf_bytes: bytes, filename: str) -> dict:
+        """
+        Upload and check PDF file via Datagrab/pdfchecker API.
+
+        POST {endpoint}/upload.php?key={api_key}
+        Returns immediate result (JSON) or HTML on error.
+        """
+        api_key = os.environ.get("DATAGRAB_API_KEY")
+        if not api_key:
+            raise RuntimeError("DATAGRAB_API_KEY not set in environment")
+
+        endpoint = os.environ.get("DATAGRAB_ENDPOINT", "https://api.datagrab.ru")
+        url = f"{endpoint}/upload.php?key={api_key}"
+
+        # Prepare multipart form data
+        form = aiohttp.FormData()
+        form.add_field('file', pdf_bytes, filename=filename, content_type='application/pdf')
+
+        # Some hosts may have certificate issues; create an SSL context option if needed
+        try:
+            import ssl
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            connector = aiohttp.TCPConnector(ssl=ssl_context)
+        except Exception:
+            connector = None
+
+        async with aiohttp.ClientSession(connector=connector) as session:
+            try:
+                async with session.post(url, data=form, timeout=60) as resp:
+                    text = await resp.text()
+                    logger.info(f"Datagrab response status: {resp.status}, content-type: {resp.content_type}")
+                    logger.debug(f"Datagrab response text (first 500 chars): {text[:500]}")
+
+                    # Try parse JSON
+                    try:
+                        parsed = json.loads(text)
+                        return parsed
+                    except Exception:
+                        # Return a normalized error for downstream handling
+                        return {"result": "error", "message": "API вернул не-JSON ответ", "raw": text[:200]}
+
+            except asyncio.TimeoutError:
+                return {"result": "error", "message": "Превышено время ожидания ответа от сервера"}
+            except Exception as e:
+                logger.exception("Failed to check PDF via Datagrab API")
+                return {"result": "error", "message": f"Ошибка при проверке: {str(e)}"}
+
+
 def format_check_result(result: dict) -> str:
     """Format API response (Datagrab or SafeCheck) into user-friendly message."""
     # Handle SafeCheck-style responses (async polling result in 'result' dict)
@@ -484,32 +534,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(document.file_id)
         pdf_bytes = await file.download_as_bytearray()
         
-        # Step 1: Upload to SafeCheck API
-        upload_result = await safecheck_upload_pdf(bytes(pdf_bytes), document.file_name or "check.pdf")
-        
-        if upload_result.get('error', 1) == 1:
-            error_msg = upload_result.get('msg', upload_result.get('message', 'Неизвестная ошибка'))
-            await msg.edit_text(f"❌ Ошибка загрузки: {error_msg}")
-            return
-
-        file_id = None
-        # SafeCheck may return file_id in different places
-        if isinstance(upload_result.get('result'), dict):
-            file_id = upload_result['result'].get('file_id')
-        if not file_id:
-            file_id = upload_result.get('file_id')
-
-        if not file_id:
-            await msg.edit_text("❌ Не получен file_id от SafeCheck API")
-            return
-
-        await msg.edit_text(f"⏳ Чек загружен (ID: {str(file_id)[:8]}...). Ожидание результата...")
-
-        # Step 2: Poll for results
-        check_result = await safecheck_get_result(file_id)
+        # Send to Datagrab/pdfchecker API (synchronous response)
+        result = await datagrab_check_pdf(bytes(pdf_bytes), document.file_name or "check.pdf")
 
         # Format and send response
-        formatted_result = format_check_result(check_result)
+        formatted_result = format_check_result(result)
         await msg.edit_text(formatted_result)
         
     except Exception as e:
