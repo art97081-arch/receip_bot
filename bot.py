@@ -21,6 +21,7 @@ from datetime import datetime
 from typing import List
 
 import aiohttp
+import re
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -250,11 +251,18 @@ def format_check_result(result: dict) -> str:
 
 
 def is_owner(user_id: int) -> bool:
-    owner = os.environ.get("OWNER_ID")
-    try:
-        return int(owner) == int(user_id)
-    except Exception:
+    owner_env = os.environ.get("OWNER_ID", "")
+    if not owner_env:
         return False
+
+    # Support multiple IDs separated by comma, semicolon or whitespace
+    for token in re.split(r"[;,\s]+", owner_env.strip()):
+        try:
+            if int(token) == int(user_id):
+                return True
+        except Exception:
+            continue
+    return False
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
