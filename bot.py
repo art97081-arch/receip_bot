@@ -24,6 +24,8 @@ import aiohttp
 import httpx
 import random
 import re
+import sys
+import telegram
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -444,7 +446,23 @@ def main():
         # run_webhook will start an HTTP server listening on 0.0.0.0:port and set the bot webhook
         app.run_webhook(listen="0.0.0.0", port=port, webhook_url=webhook_url)
     else:
-        app.run_polling()
+        try:
+            app.run_polling()
+        except telegram.error.Conflict as e:
+            logger.error("Telegram Conflict detected: another getUpdates request is active. Details: %s", e)
+            # If WEBHOOK_URL is provided, attempt to switch to webhook mode automatically.
+            webhook_url = os.environ.get("WEBHOOK_URL")
+            if webhook_url:
+                try:
+                    port = int(os.environ.get("PORT", 8080))
+                    logger.info("Attempting automatic fallback: starting webhook on port %s with url=%s", port, webhook_url)
+                    app.run_webhook(listen="0.0.0.0", port=port, webhook_url=webhook_url)
+                except Exception:
+                    logger.exception("Failed to start webhook fallback after Conflict. Exiting.")
+                    sys.exit(1)
+            else:
+                logger.error("No WEBHOOK_URL set; cannot fallback to webhook. Exiting to avoid repeated 409s.")
+                sys.exit(1)
 
 
 if __name__ == "__main__":
