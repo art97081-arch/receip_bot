@@ -22,6 +22,7 @@ from typing import List
 
 import aiohttp
 import httpx
+import random
 import re
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
@@ -64,7 +65,8 @@ async def datagrab_check_pdf(pdf_bytes: bytes, filename: str) -> dict:
     url = f"{endpoint}/upload.php?key={api_key}"
 
     # Quick robust alternative: use httpx.AsyncClient for multipart upload
-    max_retries = 3
+    # Increase retries to give Datagrab more chances during upstream issues
+    max_retries = 5
     verify_tls = os.environ.get("DATAGRAB_VERIFY_TLS", "1") != "0"
 
     for attempt in range(1, max_retries + 1):
@@ -90,13 +92,33 @@ async def datagrab_check_pdf(pdf_bytes: bytes, filename: str) -> dict:
                 logger.debug("Datagrab full response body:")
                 logger.debug(text)
 
+                # Save full HTML body to logs for post-mortem and support tickets
+                try:
+                    log_dir = BASE_DIR / "logs" / "datagrab"
+                    log_dir.mkdir(parents=True, exist_ok=True)
+                    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+                    fname = f"datagrab_{ts}_status{status}_attempt{attempt}.html"
+                    fpath = log_dir / fname
+                    with open(fpath, "w", encoding="utf-8") as fh:
+                        fh.write(text)
+                    logger.info(f"Saved Datagrab response body to {fpath}")
+                except Exception:
+                    logger.exception("Failed to write Datagrab response body to file")
+
                 if status in (502, 503, 504, 429) and attempt < max_retries:
-                    backoff = 2 ** attempt
-                    logger.info(f"Retrying Datagrab request after {backoff}s (status {status})")
+                    backoff = 2 ** attempt + random.random()
+                    logger.info(f"Retrying Datagrab request after {backoff:.1f}s (status {status})")
                     await asyncio.sleep(backoff)
                     continue
 
-                return {"error": 1, "status": status, "msg": "Datagrab returned error", "text": text}
+                # Return error with pointer to saved logfile when available
+                result_err = {"error": 1, "status": status, "msg": "Datagrab returned error", "text_preview": text[:2000]}
+                try:
+                    if 'fpath' in locals():
+                        result_err['logfile'] = str(fpath)
+                except Exception:
+                    pass
+                return result_err
 
         except httpx.HTTPError as e:
             logger.exception(f"HTTPError when calling Datagrab (attempt {attempt})")
