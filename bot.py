@@ -412,7 +412,17 @@ def main():
     app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
 
     logger.info("Starting bot...")
-    app.run_polling()
+    # Support webhook mode for production hosts (Railway). If WEBHOOK_URL is set,
+    # use webhook; otherwise fall back to polling.
+    webhook_url = os.environ.get("WEBHOOK_URL")
+    if webhook_url:
+        # PORT is provided by hosting platform (Railway). Default to 8080 for local testing.
+        port = int(os.environ.get("PORT", 8080))
+        logger.info(f"Starting webhook on port {port}, webhook_url={webhook_url}")
+        # run_webhook will start an HTTP server listening on 0.0.0.0:port and set the bot webhook
+        app.run_webhook(listen="0.0.0.0", port=port, webhook_url=webhook_url)
+    else:
+        app.run_polling()
 
 
 if __name__ == "__main__":
