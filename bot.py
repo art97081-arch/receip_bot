@@ -62,9 +62,7 @@ async def datagrab_check_pdf(pdf_bytes: bytes, filename: str) -> dict:
     endpoint = os.environ.get("DATAGRAB_ENDPOINT", "https://api.datagrab.ru")
     url = f"{endpoint}/upload.php?key={api_key}"
 
-    # Prepare multipart form data
-    form = aiohttp.FormData()
-    form.add_field('file', pdf_bytes, filename=filename, content_type='application/pdf')
+    # Note: prepare multipart form data per-attempt (don't reuse FormData across sessions)
 
     # Some hosts may have certificate issues; create an SSL context option if needed
     try:
@@ -78,13 +76,28 @@ async def datagrab_check_pdf(pdf_bytes: bytes, filename: str) -> dict:
 
     max_retries = 3
     for attempt in range(1, max_retries + 1):
+        # prepare fresh FormData each attempt to avoid reusing closed streams/payloads
+        form = aiohttp.FormData()
+        form.add_field('file', pdf_bytes, filename=filename, content_type='application/pdf')
+
         async with aiohttp.ClientSession(connector=connector) as session:
             try:
-                async with session.post(url, data=form, timeout=60) as resp:
-                    status = resp.status
-                    text = await resp.text()
-                    logger.info(f"Datagrab response status: {status}, content-type: {resp.content_type}")
-                    logger.debug(f"Datagrab response text (preview 2000 chars): {text[:2000]}")
+                try:
+                    async with session.post(url, data=form, timeout=60) as resp:
+                        status = resp.status
+                        text = await resp.text()
+                        logger.info(f"Datagrab response status: {status}, content-type: {resp.content_type}")
+                        logger.debug(f"Datagrab response text (preview 2000 chars): {text[:2000]}")
+                except RuntimeError as re_err:
+                    # Defensive: sometimes aiohttp raises "Session is closed" when payload/session
+                    # is in a bad state — log and treat as retryable
+                    logger.exception("RuntimeError during Datagrab request (will retry if attempts remain)")
+                    if attempt < max_retries:
+                        backoff = 2 ** attempt
+                        logger.info(f"Retrying Datagrab request after {backoff}s due to RuntimeError")
+                        await asyncio.sleep(backoff)
+                        continue
+                    return {"error": 1, "msg": f"RuntimeError: {str(re_err)}"}
 
                     # Successful response
                     if status == 200:
