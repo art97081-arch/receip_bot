@@ -446,23 +446,64 @@ def main():
         # run_webhook will start an HTTP server listening on 0.0.0.0:port and set the bot webhook
         app.run_webhook(listen="0.0.0.0", port=port, webhook_url=webhook_url)
     else:
+        # Pre-flight check: try a simple HTTP POST to Telegram getUpdates to detect existing poller.
         try:
-            app.run_polling()
-        except telegram.error.Conflict as e:
-            logger.error("Telegram Conflict detected: another getUpdates request is active. Details: %s", e)
-            # If WEBHOOK_URL is provided, attempt to switch to webhook mode automatically.
-            webhook_url = os.environ.get("WEBHOOK_URL")
-            if webhook_url:
-                try:
-                    port = int(os.environ.get("PORT", 8080))
-                    logger.info("Attempting automatic fallback: starting webhook on port %s with url=%s", port, webhook_url)
-                    app.run_webhook(listen="0.0.0.0", port=port, webhook_url=webhook_url)
-                except Exception:
-                    logger.exception("Failed to start webhook fallback after Conflict. Exiting.")
+            tg_api = f"https://api.telegram.org/bot{token}/getUpdates"
+            logger.info("Performing preflight getUpdates check to detect existing pollers")
+            resp = httpx.post(tg_api, timeout=5.0)
+            if resp.status_code == 409:
+                logger.error("Preflight: Telegram returned 409 Conflict — another getUpdates request is active.")
+                webhook_url = os.environ.get("WEBHOOK_URL")
+                if webhook_url:
+                    try:
+                        port = int(os.environ.get("PORT", 8080))
+                        logger.info("Falling back to webhook on port %s with url=%s", port, webhook_url)
+                        app.run_webhook(listen="0.0.0.0", port=port, webhook_url=webhook_url)
+                    except Exception:
+                        logger.exception("Failed to start webhook fallback after Conflict. Exiting.")
+                        sys.exit(1)
+                else:
+                    logger.error("No WEBHOOK_URL set; cannot fallback to webhook. Exiting to avoid repeated 409s.")
                     sys.exit(1)
             else:
-                logger.error("No WEBHOOK_URL set; cannot fallback to webhook. Exiting to avoid repeated 409s.")
-                sys.exit(1)
+                # No immediate conflict detected — start polling normally.
+                try:
+                    app.run_polling()
+                except telegram.error.Conflict as e:
+                    # In case a conflict appears asynchronously, attempt webhook fallback as before.
+                    logger.error("Telegram Conflict detected during polling: %s", e)
+                    webhook_url = os.environ.get("WEBHOOK_URL")
+                    if webhook_url:
+                        try:
+                            port = int(os.environ.get("PORT", 8080))
+                            logger.info("Attempting automatic fallback: starting webhook on port %s with url=%s", port, webhook_url)
+                            app.run_webhook(listen="0.0.0.0", port=port, webhook_url=webhook_url)
+                        except Exception:
+                            logger.exception("Failed to start webhook fallback after Conflict. Exiting.")
+                            sys.exit(1)
+                    else:
+                        logger.error("No WEBHOOK_URL set; cannot fallback to webhook. Exiting to avoid repeated 409s.")
+                        sys.exit(1)
+        except Exception as e:
+            # If preflight check failed (network issue), still attempt to start polling and let
+            # the existing try/except handle any Conflict raised asynchronously.
+            logger.warning("Preflight getUpdates check failed: %s — proceeding to run polling", e)
+            try:
+                app.run_polling()
+            except telegram.error.Conflict as e:
+                logger.error("Telegram Conflict detected during polling after failed preflight: %s", e)
+                webhook_url = os.environ.get("WEBHOOK_URL")
+                if webhook_url:
+                    try:
+                        port = int(os.environ.get("PORT", 8080))
+                        logger.info("Attempting automatic fallback: starting webhook on port %s with url=%s", port, webhook_url)
+                        app.run_webhook(listen="0.0.0.0", port=port, webhook_url=webhook_url)
+                    except Exception:
+                        logger.exception("Failed to start webhook fallback after Conflict. Exiting.")
+                        sys.exit(1)
+                else:
+                    logger.error("No WEBHOOK_URL set; cannot fallback to webhook. Exiting to avoid repeated 409s.")
+                    sys.exit(1)
 
 
 if __name__ == "__main__":
