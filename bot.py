@@ -76,25 +76,50 @@ async def datagrab_check_pdf(pdf_bytes: bytes, filename: str) -> dict:
     except Exception:
         connector = None
 
-    async with aiohttp.ClientSession(connector=connector) as session:
-        try:
-            async with session.post(url, data=form, timeout=60) as resp:
-                text = await resp.text()
-                logger.info(f"Datagrab response status: {resp.status}, content-type: {resp.content_type}")
-                logger.debug(f"Datagrab response text (first 500 chars): {text[:500]}")
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        async with aiohttp.ClientSession(connector=connector) as session:
+            try:
+                async with session.post(url, data=form, timeout=60) as resp:
+                    status = resp.status
+                    text = await resp.text()
+                    logger.info(f"Datagrab response status: {status}, content-type: {resp.content_type}")
+                    logger.debug(f"Datagrab response text (preview 2000 chars): {text[:2000]}")
 
-                # Try to parse JSON response
-                try:
-                    return json.loads(text)
-                except Exception:
-                    # Fallback: if resp.json works use it, otherwise return raw text in error
-                    try:
-                        return await resp.json()
-                    except Exception:
-                        return {"error": 1, "msg": "Invalid response from Datagrab", "text": text}
-        except Exception as e:
-            logger.exception("Failed to call Datagrab API")
-            return {"error": 1, "msg": f"Ошибка запроса: {str(e)}"}
+                    # Successful response
+                    if status == 200:
+                        try:
+                            return await resp.json()
+                        except Exception:
+                            try:
+                                return json.loads(text)
+                            except Exception:
+                                return {"error": 1, "msg": "Invalid JSON from Datagrab", "text": text}
+
+                    # For non-200, log and decide whether to retry
+                    logger.warning(f"Datagrab returned status={status} (attempt {attempt}/{max_retries})")
+                    # Log full body at debug level for post-mortem
+                    logger.debug("Datagrab full response body:")
+                    logger.debug(text)
+
+                    # Retry on typical transient status codes
+                    if status in (502, 503, 504, 429) and attempt < max_retries:
+                        backoff = 2 ** attempt
+                        logger.info(f"Retrying Datagrab request after {backoff}s (status {status})")
+                        await asyncio.sleep(backoff)
+                        continue
+
+                    # Otherwise return error dict with body for diagnostics
+                    return {"error": 1, "status": status, "msg": "Datagrab returned error", "text": text}
+
+            except Exception as e:
+                logger.exception(f"Failed to call Datagrab API (attempt {attempt})")
+                if attempt < max_retries:
+                    backoff = 2 ** attempt
+                    logger.info(f"Retrying Datagrab request after exception in {backoff}s")
+                    await asyncio.sleep(backoff)
+                    continue
+                return {"error": 1, "msg": f"Ошибка запроса: {str(e)}"}
 
 
 
